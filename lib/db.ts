@@ -4,6 +4,9 @@ import { Pool } from 'pg';
 // each holds its own connections, so a big max multiplies against Neon's limit.
 const globalForPool = globalThis as unknown as { pool?: Pool };
 
+// Without this, pg silently falls back to localhost:5432 and the error says ECONNREFUSED
+if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is not set for this Vercel environment');
+
 export const pool =
 	globalForPool.pool ??
 	new Pool({
