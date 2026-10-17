@@ -1,0 +1,25 @@
+{
+	"name": "medical-data-explorer",
+	"private": true,
+	"version": "0.1.0",
+	"scripts": {
+		"dev": "next dev",
+		"build": "next build",
+		"start": "next start"
+	},
+	"engines": {
+		"node": ">=20"
+	},
+	"dependencies": {
+		"next": "16.4.0",
+		"pg": "8.16.3",
+		"react": "19.3.0",
+		"react-dom": "19.3.0"
+	},
+	"devDependencies": {
+		"@types/node": "22.20.5",
+		"@types/pg": "8.15.5",
+		"@types/react": "19.3.0",
+		"typescript": "6.0.3"
+	}
+}
