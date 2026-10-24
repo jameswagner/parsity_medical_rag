@@ -13,10 +13,40 @@ import type { SearchResult } from './pinecone';
 import { createEmbedding } from './openai';
 import { pinecone } from './pinecone';
 
+export type NoteFilter = {
+	patientId?: string | null;
+	gender?: 'male' | 'female' | null;
+	minAge?: number | null;
+	maxAge?: number | null;
+	dob?: string | null; // YYYY-MM-DD
+	isAlive?: boolean | null;
+	race?: 'White' | 'Black or African American' | 'Asian' | null;
+	ethnicity?: 'Hispanic or Latino' | 'Non Hispanic or Latino' | null;
+};
+
 export type VectorSearchOptions = {
 	topK?: number; // candidates the cosine search fetches
 	topN?: number; // candidates kept after reranking
+	filter?: NoteFilter; // hard metadata filters applied inside Pinecone
 };
+
+// Only keys the model actually filled in become conditions (null = not asked).
+function toPineconeFilter(f: NoteFilter = {}) {
+	const filter: Record<string, unknown> = {};
+	if (f.patientId) filter.patientId = { $eq: f.patientId };
+	if (f.gender) filter.gender = { $eq: f.gender };
+	if (f.race) filter.race = { $eq: f.race };
+	if (f.ethnicity) filter.ethnicity = { $eq: f.ethnicity };
+	if (f.dob) filter.dob = { $eq: f.dob };
+	if (f.isAlive != null) filter.isAlive = { $eq: f.isAlive };
+	if (f.minAge != null || f.maxAge != null) {
+		filter.age = {
+			...(f.minAge != null && { $gte: f.minAge }),
+			...(f.maxAge != null && { $lte: f.maxAge }),
+		};
+	}
+	return Object.keys(filter).length ? filter : undefined;
+}
 
 export async function searchClinicalNotes(
 	query: string,
@@ -27,7 +57,8 @@ export async function searchClinicalNotes(
 	// search pinecone
 	const results = await pinecone.index(process.env.PINECONE_INDEX!).query({
 		vector: embedding, //query represented as 1536 vector
-		topK: 10,
+		topK: options.topK ?? 10,
+		filter: toPineconeFilter(options.filter),
 		includeMetadata: true, // contnet we got race / gender / age / etc.
 	});
 
@@ -58,7 +89,7 @@ export async function searchClinicalNotes(
 		model: 'bge-reranker-v2-m3',
 		query: query, //text
 		documents: docs, //text
-		topN: 5,
+		topN: options.topN ?? 5,
 	});
 
 	// scores against the query and the doc

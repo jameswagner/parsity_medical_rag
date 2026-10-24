@@ -1,6 +1,7 @@
 import { openai, openaiProvider } from '@/lib/openai';
 import { zodTextFormat } from 'openai/helpers/zod';
 import { searchClinicalNotes } from '@/lib/vector-search';
+import { findPatientByName } from '@/lib/patients';
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 
@@ -27,17 +28,34 @@ const selectorAgentSchema = z.object({
 		.string()
 		.min(1)
 		.describe('The reason you rejected the query.'),
-	personalInfo: z
+	// OpenAI structured outputs: optional fields must be nullable, not .optional()
+	filters: z
 		.object({
-			name: z.string().min(1).describe('The FULL name of the patient.'),
+			patientName: z
+				.string()
+				.nullable()
+				.describe('FULL name of one specific patient, or null.'),
 			dob: z
 				.string()
-				.min(1)
-				.describe(
-					'The date of birth of the patient. In this format: YYYY-MM-DD',
-				),
+				.nullable()
+				.describe('Patient date of birth, YYYY-MM-DD, or null.'),
+			gender: z.enum(['male', 'female']).nullable(),
+			race: z
+				.enum(['White', 'Black or African American', 'Asian'])
+				.nullable(),
+			ethnicity: z
+				.enum(['Hispanic or Latino', 'Non Hispanic or Latino'])
+				.nullable(),
+			minAge: z.number().nullable().describe('Minimum age in years, or null.'),
+			maxAge: z.number().nullable().describe('Maximum age in years, or null.'),
+			isAlive: z
+				.boolean()
+				.nullable()
+				.describe('true = living patients, false = deceased, null = either.'),
 		})
-		.optional(),
+		.describe(
+			'Metadata filters stated in the query. Use null for anything not stated. Never guess.',
+		),
 });
 
 const fewShotExamples = [
@@ -107,7 +125,12 @@ export async function POST(request: Request) {
 		}
 
 		if (response.output_parsed?.action === 'vector_search') {
-			const searchResults = await searchClinicalNotes(query);
+			const { patientName, ...rest } = response.output_parsed.filters;
+			// Pinecone has no names, so resolve a name to a patientId via Postgres
+			const matches = patientName ? await findPatientByName(patientName) : [];
+			const searchResults = await searchClinicalNotes(query, {
+				filter: { ...rest, patientId: matches.length === 1 ? matches[0].id : null },
+			});
 
 			const summary = await openai.responses.create({
 				model: 'gpt-6-sol',
