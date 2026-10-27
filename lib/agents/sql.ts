@@ -29,6 +29,11 @@ const FiltersSchema = z.object({
 		.describe(
 			'all = patient must have every listed condition ("and", "both"); any = at least one ("or", "either").',
 		),
+	excludeConditions: z
+		.array(z.string())
+		.describe(
+			'Condition names the patient must NOT have ("without", "no history of", "do not have"), copied EXACTLY from the provided list. Empty if none.',
+		),
 	gender: z.enum(['male', 'female']).nullable(),
 	minAge: z
 		.number()
@@ -65,6 +70,9 @@ export function buildWhere(f: Filters): Prisma.PatientWhereInput {
 	return {
 		...(conds.length &&
 			(f.conditionLogic === 'any' ? { OR: conds } : { AND: conds })),
+		...(f.excludeConditions.length && {
+			NOT: { conditions: { some: { display: { in: f.excludeConditions } } } },
+		}),
 		...(f.gender && { gender: f.gender }),
 		...(f.city && { city: { equals: f.city, mode: 'insensitive' } }),
 		...(f.alive != null && { deathDate: f.alive ? null : { not: null } }),
@@ -115,6 +123,7 @@ export async function runSql(
 	const filters = {
 		...parsed,
 		conditions: parsed.conditions.filter((c) => known.includes(c)),
+		excludeConditions: parsed.excludeConditions.filter((c) => known.includes(c)),
 	}; // filter out the conditions that are not in the data
 
 	const where = buildWhere(filters); // function NO AI

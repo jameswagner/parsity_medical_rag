@@ -7,10 +7,10 @@ import { buildWhere, type Filters } from './sql';
 const none: Filters = {
 	conditions: [],
 	conditionLogic: 'all',
+	excludeConditions: [],
 	gender: null,
 	minAge: null,
 	maxAge: null,
-	state: null,
 	city: null,
 	alive: null,
 };
@@ -31,5 +31,11 @@ describe('buildWhere', () => {
 		expect(buildWhere({ ...none, alive: false }).deathDate).toEqual({ not: null });
 		const b = buildWhere({ ...none, minAge: 40, maxAge: 60 }).birthDate as { lte: Date; gt: Date };
 		expect(b.lte.getTime()).toBeGreaterThan(b.gt.getTime());
+	});
+
+	it('excludes patients who have any of the excluded conditions', () => {
+		expect(buildWhere({ ...none, excludeConditions: ['Hypertension'] }).NOT).toEqual({
+			conditions: { some: { display: { in: ['Hypertension'] } } },
+		});
 	});
 });
