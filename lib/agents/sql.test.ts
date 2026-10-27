@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('../openai', () => ({ openai: {} }));
 vi.mock('../prisma', () => ({ prisma: {} }));
-import { buildWhere, type Filters } from './sql';
+import { buildWhere, resolveFilters, type Filters } from './sql';
 
 const none: Filters = {
 	conditions: [],
@@ -37,5 +37,24 @@ describe('buildWhere', () => {
 		expect(buildWhere({ ...none, excludeConditions: ['Hypertension'] }).NOT).toEqual({
 			conditions: { some: { display: { in: ['Hypertension'] } } },
 		});
+	});
+});
+
+describe('resolveFilters', () => {
+	const known = ['Hypertension', 'Diabetes'];
+
+	it('keeps known names and reports invented ones', () => {
+		const { filters, unknown } = resolveFilters(
+			{ ...none, conditions: ['Hypertension', 'Chest pain'], excludeConditions: ['Asthma'] },
+			known,
+		);
+		expect(filters.conditions).toEqual(['Hypertension']);
+		expect(filters.excludeConditions).toEqual([]);
+		expect(unknown).toEqual(['Chest pain', 'Asthma']);
+	});
+
+	it('leaves buildWhere empty when every requested name was invented', () => {
+		const { filters } = resolveFilters({ ...none, conditions: ['Chest pain'] }, known);
+		expect(buildWhere(filters)).toEqual({});
 	});
 });
