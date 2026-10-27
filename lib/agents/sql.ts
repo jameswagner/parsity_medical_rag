@@ -20,14 +20,14 @@ import type { Prisma } from '@prisma/client';
 
 const FiltersSchema = z.object({
 	conditions: z
-		.array(z.string())
+		.array(z.array(z.string()))
 		.describe(
-			'Condition names the question asks about, copied EXACTLY from the provided list. Empty if none.',
+			'One inner list per medical concept the question asks about. Each inner list holds every stored name for that concept (e.g. ["Myocardial Infarction", "History of myocardial infarction (situation)"]), copied EXACTLY from the provided list. Empty if none.',
 		),
 	conditionLogic: z
 		.enum(['all', 'any'])
 		.describe(
-			'all = patient must have every listed condition ("and", "both"); any = at least one ("or", "either").',
+			'How the concepts (outer list) combine: all = patient must match every concept ("and", "both"); any = at least one ("or", "either"). Names inside one concept always count as alternatives.',
 		),
 	excludeConditions: z
 		.array(z.string())
@@ -62,9 +62,10 @@ const yearsAgo = (years: number) => {
 
 /** Filters -> Prisma where. Only the filters that were actually set are applied. */
 export function buildWhere(f: Filters): Prisma.PatientWhereInput {
+	// One clause per concept; any of its stored names satisfies it.
 	const conds = f.conditions.map(
-		(display): Prisma.PatientWhereInput => ({
-			conditions: { some: { display } },
+		(names): Prisma.PatientWhereInput => ({
+			conditions: { some: { display: { in: names } } },
 		}),
 	);
 	return {
@@ -95,10 +96,12 @@ export function resolveFilters(parsed: Filters, known: string[]) {
 	return {
 		filters: {
 			...parsed,
-			conditions: parsed.conditions.filter(isKnown),
+			conditions: parsed.conditions
+				.map((names) => names.filter(isKnown))
+				.filter((names) => names.length),
 			excludeConditions: parsed.excludeConditions.filter(isKnown),
 		},
-		unknown: [...parsed.conditions, ...parsed.excludeConditions].filter(
+		unknown: [...parsed.conditions.flat(), ...parsed.excludeConditions].filter(
 			(c) => !isKnown(c),
 		),
 	};
@@ -128,7 +131,7 @@ export async function runSql(
 				Only set a filter the question actually asks for.
 				The same medical concept is often stored under more than one name
 				(e.g. "Myocardial Infarction" and "History of myocardial infarction (situation)"):
-				list every stored name that matches, not just one.\n\n
+				put every stored name that matches into one inner list of "conditions", one inner list per concept.\n\n
 				Conditions that exist in the data:\n${known.join('\n')}\n\n`,
 			},
 			...history.map((m) => ({ role: m.role, content: m.content })),
