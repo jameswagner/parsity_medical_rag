@@ -138,12 +138,7 @@ export async function runSql(
 	]);
 
 	return [
-		`Matching patients: ${total}${
-			total > LIMIT
-				? ` (showing first ${LIMIT})
-		Patients: ${patients.map((p) => `${JSON.stringify(p)}`).join('\n')}
-		`
-				: ''
-		}`,
+		`Matching patients: ${total}${total > LIMIT ? ` (showing first ${LIMIT})` : ''}`,
+		...patients.map((p) => JSON.stringify(p)),
 	].join('\n');
 }
