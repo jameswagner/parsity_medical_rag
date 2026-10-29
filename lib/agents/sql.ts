@@ -54,6 +54,23 @@ const FiltersSchema = z.object({
 
 export type Filters = z.infer<typeof FiltersSchema>;
 
+// One question can ask for several different patient groups ("how many had a
+// heart attack? how many had both heart attack and hypertension?"), and one
+// set of filters can't describe that — so the model returns one query per group.
+const QueriesSchema = z.object({
+	queries: z
+		.array(
+			FiltersSchema.extend({
+				label: z
+					.string()
+					.describe('Short name for the patient group this query counts, e.g. "heart attack".'),
+			}),
+		)
+		.describe(
+			'One entry per distinct patient group the question asks about. A single-part question has exactly one.',
+		),
+});
+
 const yearsAgo = (years: number) => {
 	const d = new Date();
 	d.setFullYear(d.getFullYear() - years);
@@ -109,41 +126,8 @@ export function resolveFilters(parsed: Filters, known: string[]) {
 
 const LIMIT = 50;
 
-export async function runSql(
-	query: string, // tell me about patient wiht a cold under 82
-	history: Message[] = [],
-): Promise<string> {
-	const [conditionRows] = await Promise.all([
-		prisma.condition.findMany({
-			distinct: ['display'],
-			select: { display: true },
-			orderBy: { display: 'asc' },
-		}),
-	]);
-	const known = conditionRows.map((c) => c.display);
-
-	const response = await openai.responses.parse({
-		model: 'gpt-6-luna',
-		input: [
-			{
-				role: 'system',
-				content: `Extract patient filters from the question. 
-				Only set a filter the question actually asks for.
-				The same medical concept is often stored under more than one name
-				(e.g. "Myocardial Infarction" and "History of myocardial infarction (situation)"):
-				put every stored name that matches into one inner list of "conditions", one inner list per concept.\n\n
-				Conditions that exist in the data:\n${known.join('\n')}\n\n`,
-			},
-			...history.map((m) => ({ role: m.role, content: m.content })),
-			{ role: 'user', content: query },
-		],
-		text: { format: zodTextFormat(FiltersSchema, 'filters') },
-	}); // get the filters from the question
-
-	const parsed = FiltersSchema.parse(response.output_parsed); // the wehere clause stuff {age: 10, condition: 'heart attack', gender: 'male', city: 'New York', alive: true}
-
-	console.log('parsed', JSON.stringify(parsed, null, 2));
-
+/** Run one filter set against the database and render it as text. */
+async function runQuery(parsed: Filters, known: string[]): Promise<string> {
 	// The model copies names from the list, but may invent some.
 	const { filters, unknown } = resolveFilters(parsed, known);
 	const notes = unknown.length
@@ -183,4 +167,51 @@ export async function runSql(
 		`Matching patients: ${total}${total > LIMIT ? ` (showing first ${LIMIT})` : ''}`,
 		...patients.map((p) => JSON.stringify(p)),
 	].join('\n');
+}
+
+export async function runSql(
+	query: string, // tell me about patient wiht a cold under 82
+	history: Message[] = [],
+): Promise<string> {
+	const conditionRows = await prisma.condition.findMany({
+		distinct: ['display'],
+		select: { display: true },
+		orderBy: { display: 'asc' },
+	});
+	const known = conditionRows.map((c) => c.display);
+
+	const response = await openai.responses.parse({
+		model: 'gpt-6-luna',
+		input: [
+			{
+				role: 'system',
+				content: `Extract patient filters from the question. 
+				Only set a filter the question actually asks for.
+				If the question asks about several different patient groups, return one query per group
+				(a group that adds a condition to another group is its own query).
+				The same medical concept is often stored under more than one name
+				(e.g. "Myocardial Infarction" and "History of myocardial infarction (situation)"):
+				put every stored name that matches into one inner list of "conditions", one inner list per concept.\n\n
+				Conditions that exist in the data:\n${known.join('\n')}\n\n`,
+			},
+			...history.map((m) => ({ role: m.role, content: m.content })),
+			{ role: 'user', content: query },
+		],
+		text: { format: zodTextFormat(QueriesSchema, 'queries') },
+	}); // get the filters from the question
+
+	const { queries } = QueriesSchema.parse(response.output_parsed);
+
+	console.log('parsed', JSON.stringify(queries, null, 2));
+
+	if (queries.length === 0) {
+		return 'No structured filter applies to this question, so no patients were selected from the database.';
+	}
+
+	const results = await Promise.all(queries.map(({ label, ...f }) => runQuery(f, known)));
+
+	// One group needs no heading; several do, so the counts stay attributable.
+	return queries.length === 1
+		? results[0]
+		: queries.map((q, i) => `### ${q.label}\n${results[i]}`).join('\n\n');
 }
