@@ -46,6 +46,21 @@ describe('scheduleAppointment', () => {
 		});
 	});
 
+	it('books the default 30min event type by slug when no event type id is set', async () => {
+		vi.stubEnv('CAL_EVENT_TYPE_ID', '');
+		fetchMock
+			.mockResolvedValueOnce(new Response(JSON.stringify({ status: 'success', data: { username: 'jane' } })))
+			.mockResolvedValueOnce(ok({ uid: 'u1' }));
+
+		const result = await scheduleAppointment({ patientName: 'A', dateTime: '2026-11-02T09:00:00Z' });
+
+		expect(result.success).toBe(true);
+		expect(fetchMock.mock.calls[0][0]).toBe('https://api.cal.com/v2/me');
+		const body = JSON.parse(fetchMock.mock.calls[1][1].body);
+		expect(body).toMatchObject({ eventTypeSlug: '30min', username: 'jane' });
+		expect(body.eventTypeId).toBeUndefined();
+	});
+
 	it('surfaces the Cal.com error message', async () => {
 		fetchMock.mockResolvedValue(
 			new Response(JSON.stringify({ status: 'error', error: { message: 'slot taken' } }), { status: 400 }),

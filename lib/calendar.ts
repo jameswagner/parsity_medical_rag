@@ -20,6 +20,9 @@
 // pinned because Cal.com changes endpoint behavior per version.
 const CAL_API_BASE = 'https://api.cal.com/v2';
 const CAL_API_VERSION = '2026-02-25';
+// Every Cal.com account gets a "30min" event type, so booking by slug works for
+// anyone who clones this repo. CAL_EVENT_TYPE_ID, if set, overrides it.
+const DEFAULT_EVENT_SLUG = '30min';
 
 export interface ScheduleRequest {
   patientName: string;
@@ -39,7 +42,7 @@ export interface ScheduleResult {
  * Check if Cal.com is configured
  */
 export function isCalConfigured(): boolean {
-  return Boolean(process.env.CAL_API_KEY && process.env.CAL_EVENT_TYPE_ID);
+  return Boolean(process.env.CAL_API_KEY);
 }
 
 /**
@@ -56,7 +59,7 @@ export async function scheduleAppointment(
   if (!isCalConfigured()) {
     return {
       success: false,
-      error: 'Cal.com is not configured. Set CAL_API_KEY and CAL_EVENT_TYPE_ID.',
+      error: 'Cal.com is not configured. Set CAL_API_KEY.',
     };
   }
 
@@ -73,16 +76,30 @@ export async function scheduleAppointment(
     return { success: false, error: `Invalid dateTime: ${request.dateTime}` };
   }
 
+  const headers = {
+    Authorization: `Bearer ${process.env.CAL_API_KEY}`,
+    'cal-api-version': CAL_API_VERSION,
+    'Content-Type': 'application/json',
+  };
+
+  let eventType: object;
+  if (process.env.CAL_EVENT_TYPE_ID) {
+    eventType = { eventTypeId: parseInt(process.env.CAL_EVENT_TYPE_ID, 10) };
+  } else {
+    const me = await fetch(`${CAL_API_BASE}/me`, { headers });
+    const username = (await me.json().catch(() => null))?.data?.username;
+    if (!username) {
+      return { success: false, error: `Could not look up the Cal.com username (${me.status}).` };
+    }
+    eventType = { eventTypeSlug: DEFAULT_EVENT_SLUG, username };
+  }
+
   const response = await fetch(`${CAL_API_BASE}/bookings`, {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${process.env.CAL_API_KEY}`,
-      'cal-api-version': CAL_API_VERSION,
-      'Content-Type': 'application/json',
-    },
+    headers,
     body: JSON.stringify({
       start: start.toISOString(),
-      eventTypeId: parseInt(process.env.CAL_EVENT_TYPE_ID!, 10),
+      ...eventType,
       attendee: {
         name: request.patientName,
         email,
