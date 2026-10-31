@@ -49,10 +49,13 @@ export async function searchClinicalNotes(
 		(match) => match?.score && match.score > 0.3,
 	);
 
-	const docs: string[] = filteredMatches.map(
-		(match) =>
-			`note: ${match.metadata?.content} \n\n metadata: ${JSON.stringify(match.metadata)}`,
-	);
+	// metadata.content IS the note, so leave it out of the metadata blob —
+	// otherwise every document carries the note twice and blows the reranker's
+	// 1024-token query+document limit.
+	const docs: string[] = filteredMatches.map((match) => {
+		const { content, ...rest } = match.metadata ?? {};
+		return `note: ${content} \n\n metadata: ${JSON.stringify(rest)}`;
+	});
 
 	const reranked = await pinecone.inference.rerank({
 		model: 'bge-reranker-v2-m3',

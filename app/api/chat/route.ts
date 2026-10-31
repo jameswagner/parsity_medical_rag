@@ -1,8 +1,10 @@
-import { openai, openaiProvider } from '@/lib/openai';
+import { openai } from '@/lib/openai';
 import { zodTextFormat } from 'openai/helpers/zod';
 import { searchClinicalNotes } from '@/lib/vector-search';
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
+import { runSql } from '@/lib/agents/sql';
+import { aggregate } from '@/lib/agents/aggregator';
 
 const ChatRequestSchema = z.object({
 	query: z.string().min(1),
@@ -16,17 +18,53 @@ const ChatRequestSchema = z.object({
 		.default([]),
 });
 
-const selectorAgentSchema = z.object({
-	action: z
-		.enum(['sql_search', 'vector_search', 'reject'])
-		.describe(
-			'The action to take. Vector search is preferred, but if the query is too complex, reject it.',
-		),
-	reason: z.string().min(5).describe('The reason you chose this action.'),
-	rejectionReason: z
+const AppointmentInfoSchema = z.object({
+	patientName: z
 		.string()
 		.min(1)
-		.describe('The reason you rejected the query.'),
+		.nullable()
+		.describe('Patient name, or null if unknown.'),
+	date: z.iso
+		.date()
+		.nullable()
+		.describe('Appointment date as YYYY-MM-DD, or null if unresolved.'),
+	time: z
+		.string()
+		.regex(/^([01]\d|2[0-3]):[0-5]\d$/)
+		.nullable()
+		.describe(
+			'Appointment time as HH:MM in 24-hour format, or null if unknown. No seconds.',
+		),
+	reason: z
+		.string()
+		.nullable()
+		.describe('Appointment reason, or null if not provided.'),
+	userMessage: z
+		.string()
+		.min(1)
+		.describe(
+			'Ask for missing details, or invite the user to confirm when complete.',
+		),
+});
+
+// enable mutlippe actioms like sql && vector search
+const selectorAgentSchema = z.object({
+	actions: z
+		.array(
+			z.enum([
+				'sql_search',
+				'vector_search',
+				'reject',
+				'schedule_appointment',
+			]),
+		)
+		.describe(
+			`The actions to take. Vector search is preferred, but if the query is too complex, reject it.
+			Scheudle appointment possibly if the query is a scheduling request.
+			Only vector and sql search can be combined.
+			`,
+		),
+
 	personalInfo: z
 		.object({
 			name: z.string().min(1).describe('The FULL name of the patient.'),
@@ -37,25 +75,36 @@ const selectorAgentSchema = z.object({
 					'The date of birth of the patient. In this format: YYYY-MM-DD',
 				),
 		})
-		.optional(),
+		.optional()
+		.nullable(),
 });
 
 const fewShotExamples = [
 	{
 		query: 'What can you tell me about patient John Doe?',
-		action: 'vector_search',
+		actions: ['vector_search'],
 		reason: 'The query is a simple patient lookup, so we can use vector search.',
 	},
 	{
-		query: 'What is the capital of Germanu',
-		action: 'rejected',
+		query: 'What is the capital of Germany',
+		actions: ['reject'],
 		reason: 'Not a medical question.',
 	},
 	{
 		query: 'Give me medical advice',
-		action: 'rejected',
+		actions: ['reject'],
 		reason: 'We NEVER give medical advice.',
 	},
+	{
+		query: 'Schedule an appointment for patient John Doe on October 25th, 2026 at 10:00 AM',
+		actions: ['schedule_appointment'],
+		reason: 'The query is a simple appointment scheduling request, so we can use the schedule_appointment action.',
+	},
+	// {
+	// 	query: 'What can you tell me about smokers in this age group or ethnicity?',
+	// 	actions: ['sql_search', 'vector_search'],
+	// 	reason: 'The query is a simple patient lookup, so we can use sql search and vector search.',
+	// },
 ];
 
 /**
@@ -68,7 +117,7 @@ const fewShotExamples = [
  *   3. call 0, 1, or 2 specialists, in parallel      (lib/agents/sql.ts, rag.ts)
  *   4. the aggregator streams the answer back        (lib/agents/aggregator.ts)
  *
- * Scheduling actions ride back to the UI in the X-Scheduling-Action header.
+ * Returns JSON: { message, schedulingAction? }. The optional action opens the calendar.
  */
 export async function POST(request: Request) {
 	try {
@@ -82,8 +131,8 @@ export async function POST(request: Request) {
 			input: [
 				{
 					role: 'system',
-					content:
-						'We are a medical facility. We need help looking up patient info. the query path to take',
+					content: `We are a medical facility. We need help looking up patient info. the query path to take
+						Generally use sql AND vector search together.`,
 				},
 				{
 					role: 'user',
@@ -100,28 +149,105 @@ export async function POST(request: Request) {
 		});
 
 		// if rejected then retrn the rejection reason
-		if (response.output_parsed?.action === 'reject') {
+		if (response.output_parsed?.actions.includes('reject')) {
 			return NextResponse.json({
-				message: response.output_parsed.rejectionReason,
+				message: "I'm sorry, I can't help with that.",
 			});
 		}
 
-		if (response.output_parsed?.action === 'vector_search') {
-			const searchResults = await searchClinicalNotes(query);
+		if (response.output_parsed?.actions.includes('schedule_appointment')) {
+			// extract the patient name and date from the query OR ask them for the information
 
-			const summary = await openai.responses.create({
-				model: 'gpt-6-sol',
+			const response = await openai.responses.parse({
+				model: 'gpt-6-luna',
 				input: [
 					{
 						role: 'system',
-						content:
-							'Summarize the following notes. Format names to not have the numbers and make it concise and readable to a non-medical person.',
+						content: `
+							Extract the patient name, date, time, and reason to schedule an appointment.
+							Today is ${new Date().toISOString().split('T')[0]}. Resolve relative dates such as Monday or tomorrow using today and the conversation.
+							Dates must be YYYY-MM-DD and times HH:MM (24-hour, no seconds).
+							Use null for missing or ambiguous fields, never placeholders such as "Not provided".
+							Ask for missing patient name, date, or time in userMessage. Reason is optional.
+							DO NOT MAKE UP INFORMATION. ONLY USE THE INFORMATION PROVIDED.
+							`,
 					},
-					{ role: 'user', content: searchResults },
+					{
+						role: 'user',
+						content: `
+						Query: ${query}
+						Previous messages: ${JSON.stringify(messages.slice(-5))}
+						`,
+					},
 				],
+				text: {
+					format: zodTextFormat(
+						AppointmentInfoSchema,
+						'appointment_info',
+					),
+				},
 			});
 
-			return NextResponse.json(summary.output_text);
+			const { patientName, date, time, reason, userMessage } =
+				AppointmentInfoSchema.parse(response.output_parsed);
+
+			return NextResponse.json({
+				message: userMessage,
+				schedulingAction:
+					patientName && date && time
+						? { patientName, date, time, reason }
+						: null,
+			});
+		}
+
+		// do we have both actions?
+		if (
+			response.output_parsed?.actions.includes('sql_search') &&
+			response.output_parsed?.actions.includes('vector_search')
+		) {
+			const [sqlSummary, vectorSummary] = await Promise.all([
+				runSql(query, messages),
+				searchClinicalNotes(query),
+			]);
+
+			console.log('sqlSummary', sqlSummary);
+			console.log('vectorSummary', vectorSummary);
+
+			const summary = await aggregate(
+				// you summarize the results
+				query,
+				messages,
+				`
+				SQL Summary: ${sqlSummary}\n\n
+				Vector Summary: ${vectorSummary}
+				`,
+			);
+
+			return NextResponse.json({
+				message: summary,
+			});
+		}
+		// if vector search then run the vector search
+		if (response.output_parsed?.actions.includes('vector_search')) {
+			const summary = await aggregate(
+				query,
+				messages,
+				`
+				Vector Summary: ${await searchClinicalNotes(query)}
+				`,
+			);
+			return NextResponse.json({ message: summary });
+		}
+
+		if (response.output_parsed?.actions.includes('sql_search')) {
+			const summary = await aggregate(
+				query,
+				messages,
+				`
+				SQL Summary: ${await runSql(query, messages)}
+				`,
+			);
+			return NextResponse.json({ message: summary });
 		}
 	} catch (error) {
 		if (error instanceof z.ZodError) {
