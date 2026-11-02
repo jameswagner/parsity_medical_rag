@@ -18,7 +18,7 @@ export async function POST(request: Request) {
 		if (!isCalConfigured()) {
 			return NextResponse.json(
 				{
-					error: 'Calendar integration not configured. Set CAL_API_KEY and CAL_EVENT_TYPE_ID.',
+					error: 'Calendar integration not configured. Set CAL_API_KEY.',
 				},
 				{ status: 503 },
 			);

@@ -16,7 +16,13 @@
  * 5. Add to .env: CAL_API_KEY and CAL_EVENT_TYPE_ID
  */
 
-const CAL_API_BASE = 'https://api.cal.com/v1';
+// v1 was shut down on 2026-04-08; bookings go through v2. The version header is
+// pinned because Cal.com changes endpoint behavior per version.
+const CAL_API_BASE = 'https://api.cal.com/v2';
+const CAL_API_VERSION = '2026-02-25';
+// Every Cal.com account gets a "30min" event type, so booking by slug works for
+// anyone who clones this repo. CAL_EVENT_TYPE_ID, if set, overrides it.
+const DEFAULT_EVENT_SLUG = '30min';
 
 export interface ScheduleRequest {
   patientName: string;
@@ -36,42 +42,83 @@ export interface ScheduleResult {
  * Check if Cal.com is configured
  */
 export function isCalConfigured(): boolean {
-  return Boolean(process.env.CAL_API_KEY && process.env.CAL_EVENT_TYPE_ID);
+  return Boolean(process.env.CAL_API_KEY);
 }
 
 /**
- * Schedule an appointment via Cal.com API
+ * Schedule an appointment via the Cal.com v2 bookings API.
  *
- * TODO: Implement this function
- * 1. Check if Cal.com is configured
- * 2. Make POST request to Cal.com bookings API
- *    - Endpoint: ${CAL_API_BASE}/bookings?apiKey=${apiKey}
- *    - Body: { eventTypeId, start, responses: { name, email }, metadata }
- * 3. Handle response and errors appropriately
- * 4. Return ScheduleResult with booking details
- *
- * Cal.com API docs: https://cal.com/docs/api-reference/v1/bookings
+ * `dateTime` may carry an offset/Z; a bare local time ("2026-11-02T09:00:00",
+ * what the chat UI sends) is read in this server's time zone.
+ * The attendee email is the patient's if given, else CAL_ATTENDEE_EMAIL —
+ * the patients are synthetic, so the confirmation goes to the demo owner.
  */
 export async function scheduleAppointment(
   request: ScheduleRequest
 ): Promise<ScheduleResult> {
-  // TODO: Implement Cal.com booking API call
-
   if (!isCalConfigured()) {
     return {
       success: false,
-      error: 'Cal.com is not configured. Set CAL_API_KEY and CAL_EVENT_TYPE_ID.',
+      error: 'Cal.com is not configured. Set CAL_API_KEY.',
     };
   }
 
-  // TODO: Make the API call to Cal.com
-  // const apiKey = process.env.CAL_API_KEY;
-  // const eventTypeId = parseInt(process.env.CAL_EVENT_TYPE_ID || '0', 10);
+  const email = request.patientEmail || process.env.CAL_ATTENDEE_EMAIL;
+  if (!email) {
+    return {
+      success: false,
+      error: 'No attendee email. Set CAL_ATTENDEE_EMAIL (the patients are synthetic).',
+    };
+  }
 
-  return {
-    success: false,
-    error: 'Not implemented - your turn!',
+  const start = new Date(request.dateTime);
+  if (Number.isNaN(start.getTime())) {
+    return { success: false, error: `Invalid dateTime: ${request.dateTime}` };
+  }
+
+  const headers = {
+    Authorization: `Bearer ${process.env.CAL_API_KEY}`,
+    'cal-api-version': CAL_API_VERSION,
+    'Content-Type': 'application/json',
   };
+
+  let eventType: object;
+  if (process.env.CAL_EVENT_TYPE_ID) {
+    eventType = { eventTypeId: parseInt(process.env.CAL_EVENT_TYPE_ID, 10) };
+  } else {
+    const me = await fetch(`${CAL_API_BASE}/me`, { headers });
+    const username = (await me.json().catch(() => null))?.data?.username;
+    if (!username) {
+      return { success: false, error: `Could not look up the Cal.com username (${me.status}).` };
+    }
+    eventType = { eventTypeSlug: DEFAULT_EVENT_SLUG, username };
+  }
+
+  const response = await fetch(`${CAL_API_BASE}/bookings`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      start: start.toISOString(),
+      ...eventType,
+      attendee: {
+        name: request.patientName,
+        email,
+        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      },
+      metadata: { patientName: request.patientName, notes: request.notes ?? '' },
+    }),
+  });
+
+  const json = await response.json().catch(() => null);
+  if (!response.ok || json?.status !== 'success') {
+    return {
+      success: false,
+      error: json?.error?.message ?? json?.message ?? `Cal.com returned ${response.status}`,
+    };
+  }
+
+  const uid: string = json.data.uid;
+  return { success: true, bookingId: uid, bookingUrl: `https://cal.com/booking/${uid}` };
 }
 
 /**

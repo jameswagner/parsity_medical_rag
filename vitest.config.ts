@@ -15,7 +15,7 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     include: ['**/*.test.ts'],
-    exclude: ['node_modules', '.next', ...(runEvals ? [] : ['lib/evals/**'])],
+    exclude: ['node_modules', '.next', 'bible-rag/**', 'multi-granularity1/**',...(runEvals ? [] : ['lib/evals/**'])],
     ...(runEvals ? { setupFiles: ['dotenv/config'] } : {}),
   },
 });
